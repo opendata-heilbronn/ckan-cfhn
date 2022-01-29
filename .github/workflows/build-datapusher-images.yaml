@@ -1,0 +1,64 @@
+name: build-datapusher-images
+on:
+  schedule:
+    - cron: "37 8 * * *"
+jobs:
+  build-ckan-datapusher:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          repository: opendata-heilbronn/ckan-cfhn
+          path: ckan-cfhn
+      - uses: actions/checkout@v2
+        with:
+          repository: ckan/datapusher
+          path: datapusher
+          fetch-depth: 0
+      - name: find latest release
+        run: |
+          cd datapusher
+          ls -lisah
+          latest_tag=$(git describe --tags $(git rev-list --tags --max-count=1))
+          echo "latest version is $latest_tag"
+          echo "latest_tag=$latest_tag" >> $GITHUB_ENV
+      - name: find latest released docker image
+        run: |
+          echo "Checking if image ghcr.io/opendata-heilbronn/ckan-datapusher:${{env.latest_tag}} already exists"
+          ghcr_token=$(curl --fail -u '${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}' 'https://ghcr.io/token?service=ghcr.io&scope=repository:opendata-heilbronn/ckan-datapusher:pull' | jq -r '.token')
+          response_code=$(curl --write-out "%{response_code}" -H "Authorization: Bearer $ghcr_token" --silent -o ./ghcr_api_output.txt 'https://ghcr.io/v2/opendata-heilbronn/ckan-datapusher/manifests/${{env.latest_tag}}')
+          if [[ "$response_code" == "200" ]]; then
+            echo "Docker image already exists";
+            echo "build_docker_image=false" >> $GITHUB_ENV
+            exit 0;
+          fi
+          if [[ "$response_code" -ne "404" ]]; then
+            echo "Error while reading images! Response code: $response_code. Error:";
+            cat ./ghcr_api_output.txt;
+            exit 1;
+          fi
+          echo "build_docker_image=true" >> $GITHUB_ENV
+          echo "Docker image does not exist, start building it"
+      - name: debug output
+        run: |
+          echo "build_docker_image: ${{ env.build_docker_image }}"
+      - name: Checkout latest release
+        if: env.build_docker_image == "true"
+        run: |
+          cd datapusher;
+          git checkout '${{ env.latest_tag }}'
+      - name: Set up docker buildx
+        if: env.build_docker_image == "true"
+        uses: docker/setup-buildx-action@v1
+      - name: Log into registry
+        if: env.build_docker_image == "true"
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+      - name: Build and push ckan
+        if: env.build_docker_image == "true"
+        uses: docker/build-push-action@v2
+        with:
+          push: true
+          tags: "ghcr.io/opendata-heilbronn/ckan-datapusher:${{env.latest_tag}}"
+          context: ./datapusher
+          file: ./ckan-cfhn/datapusher/Dockerfile
